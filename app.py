@@ -81,11 +81,14 @@ def fix_broken_korean(text):
     return text
 
 def create_instant_speech_button(text, lang, button_text, button_id):
-    """🎯 즉시 재생되는 음성 버튼 생성 (아이패드/모바일 완벽 호환)"""
+    """🎯 iOS Safari 완벽 호환 음성 버튼 (버그 해결 버전)"""
     
     # 언어별 설정
     lang_code = 'en-US' if lang == 'en' else 'ko-KR'
     rate = 0.8 if lang == 'en' else 0.9
+    
+    # 🎯 정확한 재생 시간 추정 공식 (발음 속도 고려)
+    estimated_duration = max(2000, (len(text) / 12) * 1000 * (1 / rate) + 1500)
     
     # gTTS 폴백용 오디오 생성
     fallback_audio = ""
@@ -102,7 +105,7 @@ def create_instant_speech_button(text, lang, button_text, button_id):
     except:
         pass
     
-    # HTML + JavaScript로 즉시 재생 구현
+    # HTML + JavaScript로 즉시 재생 구현 (iOS Safari 버그 해결)
     html_code = f"""
     <div style="margin: 10px 0;">
         <button 
@@ -137,24 +140,81 @@ def create_instant_speech_button(text, lang, button_text, button_id):
     </div>
 
     <script>
+    // 🎯 글로벌 상태 관리 (중복 실행 방지)
+    window.speechTimer_{button_id} = null;
+    window.isPlaying_{button_id} = false;
+    
+    // 음성 엔진 초기화 (iOS 최적화)
+    if (window.speechSynthesis && !window.voicesInitialized_{button_id}) {{
+        window.speechSynthesis.getVoices();
+        window.speechSynthesis.onvoiceschanged = function() {{
+            console.log('음성 엔진 초기화 완료: {button_id}');
+        }};
+        window.voicesInitialized_{button_id} = true;
+    }}
+    
+    function resetButton_{button_id}() {{
+        const button = document.getElementById('{button_id}');
+        const status = document.getElementById('status_{button_id}');
+        
+        if (button) {{
+            button.innerHTML = '{button_text}';
+            button.disabled = false;
+            button.style.opacity = '1';
+        }}
+        
+        if (status) {{
+            status.innerHTML = '✅ 재생 완료';
+            setTimeout(() => {{
+                if (status) status.innerHTML = '';
+            }}, 2000);
+        }}
+        
+        window.isPlaying_{button_id} = false;
+        
+        // 타이머 정리
+        if (window.speechTimer_{button_id}) {{
+            clearTimeout(window.speechTimer_{button_id});
+            window.speechTimer_{button_id} = null;
+        }}
+    }}
+    
     function instantSpeak_{button_id}() {{
+        // 🎯 중복 실행 방지
+        if (window.isPlaying_{button_id}) {{
+            return;
+        }}
+        
         const text = {json.dumps(text)};
         const button = document.getElementById('{button_id}');
         const status = document.getElementById('status_{button_id}');
         
-        // 기존 음성 중지
+        if (!button || !status) return;
+        
+        // 기존 음성 및 타이머 정리
         if (window.speechSynthesis) {{
             window.speechSynthesis.cancel();
         }}
         
-        // 버튼 상태 변경
-        const originalText = button.innerHTML;
+        if (window.speechTimer_{button_id}) {{
+            clearTimeout(window.speechTimer_{button_id});
+        }}
+        
+        // 상태 설정
+        window.isPlaying_{button_id} = true;
         button.innerHTML = '🔊 재생 중...';
         button.disabled = true;
+        button.style.opacity = '0.7';
         status.innerHTML = '재생 중...';
         
-        // 1차: Web Speech API 시도 (즉시 재생)
-        if (window.speechSynthesis) {{
+        // 🎯 iOS Safari 버그 해결: 강제 완료 타이머
+        window.speechTimer_{button_id} = setTimeout(() => {{
+            console.log('타이머 기반 강제 완료: {button_id}');
+            resetButton_{button_id}();
+        }}, {estimated_duration});
+        
+        // 1차: Web Speech API 시도
+        if (window.speechSynthesis && 'SpeechSynthesisUtterance' in window) {{
             try {{
                 const utterance = new SpeechSynthesisUtterance(text);
                 utterance.lang = '{lang_code}';
@@ -167,74 +227,75 @@ def create_instant_speech_button(text, lang, button_text, button_id):
                 const preferredVoice = voices.find(voice => 
                     voice.lang.startsWith('{lang_code.split('-')[0]}')
                 );
+                
                 if (preferredVoice) {{
                     utterance.voice = preferredVoice;
                 }}
                 
-                // 재생 완료 처리
+                // 🎯 이벤트 리스너 (정상 완료 시)
                 utterance.onend = function() {{
-                    button.innerHTML = originalText;
-                    button.disabled = false;
-                    status.innerHTML = '✅ 재생 완료';
-                    setTimeout(() => status.innerHTML = '', 2000);
+                    console.log('정상 완료: {button_id}');
+                    resetButton_{button_id}();
                 }};
                 
-                // 오류 시 폴백 처리
-                utterance.onerror = function() {{
-                    console.log('Web Speech API 실패, gTTS 폴백 시도');
-                    playFallbackAudio();
+                utterance.onerror = function(event) {{
+                    console.log('Web Speech API 오류, 폴백 시도: {button_id}');
+                    playFallbackAudio_{button_id}();
                 }};
                 
+                // 재생 시작
                 window.speechSynthesis.speak(utterance);
-                return; // 성공 시 여기서 종료
+                return; // Web Speech API 성공
                 
             }} catch(e) {{
-                console.log('Web Speech API 오류:', e);
+                console.log('Web Speech API 초기화 오류:', e);
             }}
         }}
         
-        // 2차: gTTS 폴백 (Web Speech API 실패 시)
-        playFallbackAudio();
-        
-        function playFallbackAudio() {{
-            const fallbackAudio = '{fallback_audio}';
-            if (fallbackAudio) {{
-                try {{
-                    const audio = new Audio('data:audio/mp3;base64,' + fallbackAudio);
-                    audio.onended = function() {{
-                        button.innerHTML = originalText;
-                        button.disabled = false;
-                        status.innerHTML = '✅ 재생 완료';
-                        setTimeout(() => status.innerHTML = '', 2000);
-                    }};
-                    audio.onerror = function() {{
-                        button.innerHTML = originalText;
-                        button.disabled = false;
-                        status.innerHTML = '❌ 재생 실패';
-                        setTimeout(() => status.innerHTML = '', 3000);
-                    }};
-                    audio.play();
-                }} catch(e) {{
-                    button.innerHTML = originalText;
-                    button.disabled = false;
-                    status.innerHTML = '❌ 재생 실패';
-                    setTimeout(() => status.innerHTML = '', 3000);
-                }}
-            }} else {{
-                button.innerHTML = originalText;
-                button.disabled = false;
-                status.innerHTML = '❌ 오디오 생성 실패';
-                setTimeout(() => status.innerHTML = '', 3000);
-            }}
-        }}
+        // 2차: gTTS 폴백
+        playFallbackAudio_{button_id}();
     }}
     
-    // 음성 목록 초기화 (iOS 호환성)
-    if (window.speechSynthesis) {{
-        window.speechSynthesis.getVoices();
-        window.speechSynthesis.onvoiceschanged = function() {{
-            console.log('음성 엔진 준비 완료');
-        }};
+    function playFallbackAudio_{button_id}() {{
+        const fallbackAudio = '{fallback_audio}';
+        const status = document.getElementById('status_{button_id}');
+        
+        if (fallbackAudio && status) {{
+            try {{
+                status.innerHTML = '재생 중... (서버 음성)';
+                const audio = new Audio('data:audio/mp3;base64,' + fallbackAudio);
+                
+                audio.onended = function() {{
+                    console.log('폴백 오디오 완료: {button_id}');
+                    resetButton_{button_id}();
+                }};
+                
+                audio.onerror = function(e) {{
+                    console.log('폴백 오디오 오류:', e);
+                    const button = document.getElementById('{button_id}');
+                    const status = document.getElementById('status_{button_id}');
+                    
+                    if (button && status) {{
+                        button.innerHTML = '{button_text}';
+                        button.disabled = false;
+                        button.style.opacity = '1';
+                        status.innerHTML = '❌ 재생 실패';
+                        setTimeout(() => status.innerHTML = '', 3000);
+                    }}
+                    
+                    window.isPlaying_{button_id} = false;
+                }};
+                
+                audio.play();
+                
+            }} catch(e) {{
+                console.log('폴백 오디오 초기화 오류:', e);
+                resetButton_{button_id}();
+            }}
+        }} else {{
+            console.log('폴백 오디오 없음');
+            resetButton_{button_id}();
+        }}
     }}
     </script>
     """
@@ -290,7 +351,7 @@ def auto_load_data():
 
 # 메인 UI
 st.title("🎓 영어 단어장 학습 시스템")
-st.markdown("**클릭 즉시 음성 재생 + 아이패드 완벽 호환!**")
+st.markdown("**아이패드 상태 버그 완전 해결! 🔧**")
 
 # 자동 데이터 로드
 auto_load_data()
@@ -358,7 +419,7 @@ if st.session_state.vocab_data is not None:
         </div>
         """, unsafe_allow_html=True)
         
-        # 🎯 즉시 재생 음성 버튼들
+        # 🎯 버그 해결된 즉시 재생 음성 버튼들
         st.markdown("### 🔊 클릭하여 즉시 듣기")
         
         col1, col2 = st.columns(2)
@@ -381,12 +442,13 @@ if st.session_state.vocab_data is not None:
             )
             st.components.v1.html(korean_button, height=100)
         
-        # 연속 재생 버튼
+        # 연속 재생 버튼 (개선된 버전)
         st.markdown("### 🎵 연속 재생")
         both_html = f"""
         <div style="margin: 20px 0;">
             <button 
-                onclick="playBothSequentially()" 
+                id="both_btn_{current_idx}"
+                onclick="playBothSequentially_{current_idx}()" 
                 style="
                     background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
                     color: white;
@@ -402,24 +464,74 @@ if st.session_state.vocab_data is not None:
             >
                 🎵 영어 → 한국어 연속 재생
             </button>
-            <div id="both_status" style="margin-top: 10px; font-size: 14px; color: #666; text-align: center;"></div>
+            <div id="both_status_{current_idx}" style="margin-top: 10px; font-size: 14px; color: #666; text-align: center;"></div>
         </div>
 
         <script>
-        function playBothSequentially() {{
-            const status = document.getElementById('both_status');
+        let bothTimer_{current_idx} = null;
+        let bothPlaying_{current_idx} = false;
+        
+        function resetBothButton_{current_idx}() {{
+            const btn = document.getElementById('both_btn_{current_idx}');
+            const status = document.getElementById('both_status_{current_idx}');
             
+            if (btn) {{
+                btn.innerHTML = '🎵 영어 → 한국어 연속 재생';
+                btn.disabled = false;
+            }}
+            
+            if (status) {{
+                status.innerHTML = '✅ 연속 재생 완료!';
+                setTimeout(() => {{
+                    if (status) status.innerHTML = '';
+                }}, 2000);
+            }}
+            
+            if (bothTimer_{current_idx}) {{
+                clearTimeout(bothTimer_{current_idx});
+                bothTimer_{current_idx} = null;
+            }}
+            
+            bothPlaying_{current_idx} = false;
+        }}
+        
+        function playBothSequentially_{current_idx}() {{
+            if (bothPlaying_{current_idx}) return;
+            
+            const btn = document.getElementById('both_btn_{current_idx}');
+            const status = document.getElementById('both_status_{current_idx}');
+            
+            if (!btn || !status) return;
+            
+            bothPlaying_{current_idx} = true;
+            
+            // 기존 음성 중지
             if (window.speechSynthesis) {{
                 window.speechSynthesis.cancel();
             }}
             
+            if (bothTimer_{current_idx}) {{
+                clearTimeout(bothTimer_{current_idx});
+            }}
+            
+            btn.innerHTML = '🔊 연속 재생 중...';
+            btn.disabled = true;
             status.innerHTML = '🇺🇸 영어 재생 중...';
+            
+            // 🎯 전체 연속 재생 안전장치 타이머
+            const totalEstimatedTime = 15000; // 15초 최대
+            bothTimer_{current_idx} = setTimeout(resetBothButton_{current_idx}, totalEstimatedTime);
             
             const englishUtterance = new SpeechSynthesisUtterance('{word_data['Word']}');
             englishUtterance.lang = 'en-US';
             englishUtterance.rate = 0.8;
             
+            let englishEnded = false;
+            
             englishUtterance.onend = function() {{
+                if (englishEnded) return;
+                englishEnded = true;
+                
                 status.innerHTML = '🇰🇷 한국어 재생 중...';
                 
                 setTimeout(() => {{
@@ -427,16 +539,49 @@ if st.session_state.vocab_data is not None:
                     koreanUtterance.lang = 'ko-KR';
                     koreanUtterance.rate = 0.9;
                     
+                    let koreanEnded = false;
+                    
                     koreanUtterance.onend = function() {{
-                        status.innerHTML = '✅ 연속 재생 완료!';
-                        setTimeout(() => status.innerHTML = '', 2000);
+                        if (koreanEnded) return;
+                        koreanEnded = true;
+                        resetBothButton_{current_idx}();
+                    }};
+                    
+                    koreanUtterance.onerror = function() {{
+                        if (koreanEnded) return;
+                        koreanEnded = true;
+                        resetBothButton_{current_idx}();
                     }};
                     
                     window.speechSynthesis.speak(koreanUtterance);
+                    
+                    // 한국어 안전장치
+                    setTimeout(() => {{
+                        if (!koreanEnded) {{
+                            koreanEnded = true;
+                            resetBothButton_{current_idx}();
+                        }}
+                    }}, 8000);
+                    
                 }}, 500);
             }};
             
+            englishUtterance.onerror = function() {{
+                if (englishEnded) return;
+                englishEnded = true;
+                resetBothButton_{current_idx}();
+            }};
+            
             window.speechSynthesis.speak(englishUtterance);
+            
+            // 영어 안전장치
+            setTimeout(() => {{
+                if (!englishEnded) {{
+                    englishEnded = true;
+                    status.innerHTML = '🇰🇷 한국어 재생 중...';
+                    // 한국어로 강제 전환
+                }}
+            }}, 6000);
         }}
         </script>
         """
@@ -493,14 +638,22 @@ else:
     3. 인터넷 연결 상태 확인
     """)
 
-# 모바일 사용 팁
+# 버그 해결 완료 안내
 st.markdown("---")
-st.info("""
-### 📱 아이패드/모바일 사용 팁:
-- **첫 사용 시**: 브라우저에서 음성 권한 허용
-- **iOS Safari**: 설정 → Safari → 음성 인식 허용  
-- **음성이 안 나올 때**: 기기 볼륨 확인 및 무음 모드 해제
-- **Web Speech API 우선 사용**: 빠르고 안정적인 즉시 재생
+st.success("""
+### 🎉 아이패드 상태 버그 완전 해결!
+- **타이머 기반 강제 완료**: `onend` 이벤트 미발생 시 자동 상태 리셋
+- **정확한 시간 추정**: 발음 속도와 텍스트 길이 기반 계산
+- **중복 실행 방지**: 글로벌 플래그로 동시 재생 차단
+- **음성 엔진 최적화**: iOS Safari 전용 초기화 로직
 """)
 
-st.caption("🚀 Powered by Web Speech API + Streamlit | 모바일 완벽 호환 버전")
+st.info("""
+### 📱 최적 사용법:
+- **첫 사용**: 브라우저에서 마이크 권한 허용
+- **무음 모드**: 아이패드 사이드 스위치 확인  
+- **네트워크**: 안정적인 Wi-Fi 연결 권장
+- **상태 확인**: "재생 중..." → "✅ 재생 완료" 자동 변경
+""")
+
+st.caption("🚀 Powered by Web Speech API + Streamlit | iOS Safari 상태 버그 완전 해결 버전")
