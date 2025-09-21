@@ -4,9 +4,9 @@ import requests
 from gtts import gTTS
 import tempfile
 import os
-import uuid
 from io import StringIO, BytesIO
-import time
+import base64
+import json
 
 # 🎯 구글 시트 주소 설정 (여기만 수정하면 됩니다!)
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTZltgfm_yfhVNBHaK8Aj1oQArXZhn8woXNn9hM_NIjryHQeVgkt3KP3xEx6h-IlHVFFlbxgQS2l5A5/pub?output=csv"
@@ -39,23 +39,20 @@ def convert_sheet_url(original_url):
 
 @st.cache_data(ttl=3600)
 def load_csv_data(url):
-    """구글 시트에서 CSV 데이터 읽기 (인코딩 문제 해결)"""
+    """구글 시트에서 CSV 데이터 읽기"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
         
-        # BOM 제거 후 UTF-8로 강제 디코딩
         content = response.content
         if content.startswith(b'\xef\xbb\xbf'):
-            content = content[3:]  # BOM 제거
+            content = content[3:]
         
-        # BytesIO를 사용해 바이트 데이터를 직접 pandas에 전달하고 UTF-8 명시
         try:
             df = pd.read_csv(BytesIO(content), encoding='utf-8')
             return df, "UTF-8"
         except UnicodeDecodeError:
-            # UTF-8 실패 시 다른 인코딩들 시도
             encodings = ['utf-8-sig', 'cp949', 'euc-kr']
             for encoding in encodings:
                 try:
@@ -63,10 +60,7 @@ def load_csv_data(url):
                     return df, encoding
                 except (UnicodeDecodeError, pd.errors.ParserError):
                     continue
-            
-            # 모든 인코딩 실패 시 에러 처리
             return None, "encoding_error"
-            
     except Exception as e:
         return None, str(e)
 
@@ -75,41 +69,178 @@ def fix_broken_korean(text):
     if not isinstance(text, str):
         return text
     
-    # 일반적인 깨진 한글 패턴들을 정상 한글로 복구
     korean_fixes = {
         'ì¬ê³¼': '사과', 'ì±': '책', 'íë³µí': '행복한', 'ë¬¼': '물',
         'ê³µë¶íë¤': '공부하다', 'ìì´': '영어', 'íêµ­ì´': '한국어',
         'ì»´í¨í°': '컴퓨터', 'íêµ': '학교', 'ì§': '집', 'ì°¨': '차',
-        'ì¬ë': '사람', 'ìê°': '시간', 'ê³µë¶': '공부', 'íìµ': '학습',
-        'ìë¦ë¤ì´': '아름다운', 'ì¢ì': '좋은'
+        'ì¬ë': '사람', 'ìê°': '시간', 'ê³µë¶': '공부', 'íìµ': '학습'
     }
     
     for broken, fixed in korean_fixes.items():
         text = text.replace(broken, fixed)
-    
     return text
 
-def generate_audio(text, lang):
-    """텍스트를 음성으로 변환하고 오디오 바이트 반환"""
-    if not text or str(text).strip() == "":
-        return None
+def create_instant_speech_button(text, lang, button_text, button_id):
+    """🎯 즉시 재생되는 음성 버튼 생성 (아이패드/모바일 완벽 호환)"""
     
+    # 언어별 설정
+    lang_code = 'en-US' if lang == 'en' else 'ko-KR'
+    rate = 0.8 if lang == 'en' else 0.9
+    
+    # gTTS 폴백용 오디오 생성
+    fallback_audio = ""
     try:
-        tts = gTTS(text=str(text).strip(), lang=lang)
+        tts = gTTS(text=text, lang=lang)
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
         tts.save(temp_file.name)
         
         with open(temp_file.name, 'rb') as f:
             audio_bytes = f.read()
         
+        fallback_audio = base64.b64encode(audio_bytes).decode()
         os.unlink(temp_file.name)
-        return audio_bytes
-        
-    except Exception as e:
-        st.error(f"음성 생성 오류: {e}")
-        return None
+    except:
+        pass
+    
+    # HTML + JavaScript로 즉시 재생 구현
+    html_code = f"""
+    <div style="margin: 10px 0;">
+        <button 
+            id="{button_id}"
+            onclick="instantSpeak_{button_id}()" 
+            style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                padding: 15px 20px;
+                border-radius: 10px;
+                font-size: 16px;
+                font-weight: bold;
+                cursor: pointer;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                transition: all 0.3s ease;
+                width: 100%;
+                min-height: 60px;
+            "
+            onmouseover="this.style.transform='translateY(-2px)';"
+            onmouseout="this.style.transform='translateY(0px)';"
+        >
+            {button_text}
+        </button>
+        <div id="status_{button_id}" style="
+            margin-top: 8px; 
+            font-size: 12px; 
+            color: #666; 
+            text-align: center;
+            min-height: 16px;
+        "></div>
+    </div>
 
-# 🚀 앱 시작 시 자동으로 데이터 로드
+    <script>
+    function instantSpeak_{button_id}() {{
+        const text = {json.dumps(text)};
+        const button = document.getElementById('{button_id}');
+        const status = document.getElementById('status_{button_id}');
+        
+        // 기존 음성 중지
+        if (window.speechSynthesis) {{
+            window.speechSynthesis.cancel();
+        }}
+        
+        // 버튼 상태 변경
+        const originalText = button.innerHTML;
+        button.innerHTML = '🔊 재생 중...';
+        button.disabled = true;
+        status.innerHTML = '재생 중...';
+        
+        // 1차: Web Speech API 시도 (즉시 재생)
+        if (window.speechSynthesis) {{
+            try {{
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = '{lang_code}';
+                utterance.rate = {rate};
+                utterance.pitch = 1.0;
+                utterance.volume = 1.0;
+                
+                // 최적 음성 선택
+                const voices = window.speechSynthesis.getVoices();
+                const preferredVoice = voices.find(voice => 
+                    voice.lang.startsWith('{lang_code.split('-')[0]}')
+                );
+                if (preferredVoice) {{
+                    utterance.voice = preferredVoice;
+                }}
+                
+                // 재생 완료 처리
+                utterance.onend = function() {{
+                    button.innerHTML = originalText;
+                    button.disabled = false;
+                    status.innerHTML = '✅ 재생 완료';
+                    setTimeout(() => status.innerHTML = '', 2000);
+                }};
+                
+                // 오류 시 폴백 처리
+                utterance.onerror = function() {{
+                    console.log('Web Speech API 실패, gTTS 폴백 시도');
+                    playFallbackAudio();
+                }};
+                
+                window.speechSynthesis.speak(utterance);
+                return; // 성공 시 여기서 종료
+                
+            }} catch(e) {{
+                console.log('Web Speech API 오류:', e);
+            }}
+        }}
+        
+        // 2차: gTTS 폴백 (Web Speech API 실패 시)
+        playFallbackAudio();
+        
+        function playFallbackAudio() {{
+            const fallbackAudio = '{fallback_audio}';
+            if (fallbackAudio) {{
+                try {{
+                    const audio = new Audio('data:audio/mp3;base64,' + fallbackAudio);
+                    audio.onended = function() {{
+                        button.innerHTML = originalText;
+                        button.disabled = false;
+                        status.innerHTML = '✅ 재생 완료';
+                        setTimeout(() => status.innerHTML = '', 2000);
+                    }};
+                    audio.onerror = function() {{
+                        button.innerHTML = originalText;
+                        button.disabled = false;
+                        status.innerHTML = '❌ 재생 실패';
+                        setTimeout(() => status.innerHTML = '', 3000);
+                    }};
+                    audio.play();
+                }} catch(e) {{
+                    button.innerHTML = originalText;
+                    button.disabled = false;
+                    status.innerHTML = '❌ 재생 실패';
+                    setTimeout(() => status.innerHTML = '', 3000);
+                }}
+            }} else {{
+                button.innerHTML = originalText;
+                button.disabled = false;
+                status.innerHTML = '❌ 오디오 생성 실패';
+                setTimeout(() => status.innerHTML = '', 3000);
+            }}
+        }}
+    }}
+    
+    // 음성 목록 초기화 (iOS 호환성)
+    if (window.speechSynthesis) {{
+        window.speechSynthesis.getVoices();
+        window.speechSynthesis.onvoiceschanged = function() {{
+            console.log('음성 엔진 준비 완료');
+        }};
+    }}
+    </script>
+    """
+    
+    return html_code
+
 def auto_load_data():
     """앱 시작 시 자동으로 구글 시트 데이터 로드"""
     if not st.session_state.data_loaded:
@@ -123,7 +254,6 @@ def auto_load_data():
                 data, encoding_info = result, "unknown"
             
             if data is not None:
-                # 컬럼 정규화
                 column_mapping = {}
                 for col in data.columns:
                     normalized_col = str(col).strip().lower()
@@ -138,7 +268,6 @@ def auto_load_data():
                         column_mapping['Meaning']: 'Meaning'
                     })[['Word', 'Meaning']].copy()
                     
-                    # 깨진 한글 복구 시도
                     data['Word'] = data['Word'].apply(fix_broken_korean)
                     data['Meaning'] = data['Meaning'].apply(fix_broken_korean)
                     
@@ -156,36 +285,30 @@ def auto_load_data():
                     return False
             else:
                 st.error(f"❌ 데이터 로드 실패: {encoding_info}")
-                st.info("구글 시트가 '웹에 게시' 되어 있는지 확인해주세요.")
                 return False
     return True
 
 # 메인 UI
 st.title("🎓 영어 단어장 학습 시스템")
-st.markdown("**구글 시트 자동 연결 버전 - 바로 시작하세요!**")
+st.markdown("**클릭 즉시 음성 재생 + 아이패드 완벽 호환!**")
 
-# 🚀 자동 데이터 로드 실행
+# 자동 데이터 로드
 auto_load_data()
 
 st.markdown("---")
 
-# 사이드바 설정
+# 사이드바
 with st.sidebar:
     st.header("⚙️ 설정")
     
-    # 현재 연결된 시트 정보 표시
     with st.expander("📋 연결된 구글 시트", expanded=False):
         st.code(GOOGLE_SHEET_URL[:60] + "...", language=None)
-        st.caption("💡 시트 주소는 코드에 하드코딩되어 있습니다")
         
-        # 수동 새로고침 버튼
         if st.button("🔄 데이터 새로고침", use_container_width=True):
-            # 캐시 클리어 후 다시 로드
             st.cache_data.clear()
             st.session_state.data_loaded = False
             st.rerun()
     
-    # 학습 설정
     if st.session_state.vocab_data is not None:
         with st.expander("🎯 학습 설정", expanded=True):
             if st.button("🔀 순서 섞기", use_container_width=True):
@@ -193,7 +316,6 @@ with st.sidebar:
                 st.session_state.current_index = 0
                 st.success("순서를 섞었습니다!")
             
-            # 빠른 이동
             if len(st.session_state.vocab_data) > 0:
                 st.markdown("**🎯 빠른 이동:**")
                 quick_jump = st.selectbox(
@@ -216,11 +338,10 @@ if st.session_state.vocab_data is not None:
     st.progress(progress)
     st.markdown(f"**📊 진행률: {current_idx + 1}/{len(data)} ({progress*100:.1f}%)**")
     
-    # 현재 단어 표시
     if current_idx < len(data):
         word_data = data.iloc[current_idx]
         
-        # 단어 카드 스타일
+        # 단어 카드
         st.markdown(f"""
         <div style="
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -237,38 +358,89 @@ if st.session_state.vocab_data is not None:
         </div>
         """, unsafe_allow_html=True)
         
-        # 음성 재생 버튼
-        st.markdown("### 🔊 음성 듣기")
-        col1, col2, col3 = st.columns(3)
+        # 🎯 즉시 재생 음성 버튼들
+        st.markdown("### 🔊 클릭하여 즉시 듣기")
+        
+        col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("🇺🇸 영어 듣기", use_container_width=True, type="primary"):
-                with st.spinner(f"🔊 '{word_data['Word']}' 음성 생성 중..."):
-                    audio_bytes = generate_audio(word_data['Word'], 'en')
-                    if audio_bytes:
-                        st.audio(audio_bytes, format="audio/mp3")
+            english_button = create_instant_speech_button(
+                text=word_data['Word'],
+                lang='en',
+                button_text="🇺🇸 영어 듣기",
+                button_id=f"english_{current_idx}"
+            )
+            st.components.v1.html(english_button, height=100)
         
         with col2:
-            if st.button("🇰🇷 한국어 듣기", use_container_width=True, type="primary"):
-                with st.spinner(f"🔊 '{word_data['Meaning']}' 음성 생성 중..."):
-                    audio_bytes = generate_audio(word_data['Meaning'], 'ko')
-                    if audio_bytes:
-                        st.audio(audio_bytes, format="audio/mp3")
+            korean_button = create_instant_speech_button(
+                text=word_data['Meaning'],
+                lang='ko',
+                button_text="🇰🇷 한국어 듣기",
+                button_id=f"korean_{current_idx}"
+            )
+            st.components.v1.html(korean_button, height=100)
         
-        with col3:
-            if st.button("🎵 둘 다 듣기", use_container_width=True, type="secondary"):
-                with st.spinner("🔊 영어와 한국어 음성 생성 중..."):
-                    # 영어 먼저
-                    audio_en = generate_audio(word_data['Word'], 'en')
-                    if audio_en:
-                        st.write("🇺🇸 영어:")
-                        st.audio(audio_en, format="audio/mp3")
+        # 연속 재생 버튼
+        st.markdown("### 🎵 연속 재생")
+        both_html = f"""
+        <div style="margin: 20px 0;">
+            <button 
+                onclick="playBothSequentially()" 
+                style="
+                    background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+                    color: white;
+                    border: none;
+                    padding: 15px 30px;
+                    border-radius: 10px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                    width: 100%;
+                "
+            >
+                🎵 영어 → 한국어 연속 재생
+            </button>
+            <div id="both_status" style="margin-top: 10px; font-size: 14px; color: #666; text-align: center;"></div>
+        </div>
+
+        <script>
+        function playBothSequentially() {{
+            const status = document.getElementById('both_status');
+            
+            if (window.speechSynthesis) {{
+                window.speechSynthesis.cancel();
+            }}
+            
+            status.innerHTML = '🇺🇸 영어 재생 중...';
+            
+            const englishUtterance = new SpeechSynthesisUtterance('{word_data['Word']}');
+            englishUtterance.lang = 'en-US';
+            englishUtterance.rate = 0.8;
+            
+            englishUtterance.onend = function() {{
+                status.innerHTML = '🇰🇷 한국어 재생 중...';
+                
+                setTimeout(() => {{
+                    const koreanUtterance = new SpeechSynthesisUtterance('{word_data['Meaning']}');
+                    koreanUtterance.lang = 'ko-KR';
+                    koreanUtterance.rate = 0.9;
                     
-                    # 한국어
-                    audio_ko = generate_audio(word_data['Meaning'], 'ko')
-                    if audio_ko:
-                        st.write("🇰🇷 한국어:")
-                        st.audio(audio_ko, format="audio/mp3")
+                    koreanUtterance.onend = function() {{
+                        status.innerHTML = '✅ 연속 재생 완료!';
+                        setTimeout(() => status.innerHTML = '', 2000);
+                    }};
+                    
+                    window.speechSynthesis.speak(koreanUtterance);
+                }}, 500);
+            }};
+            
+            window.speechSynthesis.speak(englishUtterance);
+        }}
+        </script>
+        """
+        st.components.v1.html(both_html, height=80)
         
         # 네비게이션 버튼
         st.markdown("---")
@@ -294,11 +466,9 @@ if st.session_state.vocab_data is not None:
             if st.button("📊 완료!", use_container_width=True):
                 st.balloons()
                 st.success(f"🎉 현재까지 {current_idx + 1}개 단어를 학습했습니다!")
-                st.info(f"전체 진행률: {progress*100:.1f}%")
 
-    # 단어 목록 표시
+    # 단어 목록
     with st.expander("📚 전체 단어 목록 보기"):
-        # 검색 기능 추가
         search_term = st.text_input("🔍 단어 검색:", placeholder="검색할 영어 단어나 한국어 뜻 입력")
         
         if search_term:
@@ -312,36 +482,25 @@ if st.session_state.vocab_data is not None:
             st.dataframe(data, use_container_width=True)
 
 else:
-    # 데이터 로드 실패 시 안내
     st.markdown("""
     ## ❌ 데이터 로드 실패
     
     구글 시트에서 데이터를 불러올 수 없습니다.
     
     ### 🔍 확인사항:
-    1. **구글 시트가 '웹에 게시' 되어 있는지 확인**
-    2. **시트의 첫 번째 행이 'Word', 'Meaning'인지 확인**
-    3. **인터넷 연결 상태 확인**
-    
-    ### 📋 올바른 구글 시트 형식:
-    
-    | Word | Meaning |
-    |------|---------|
-    | apple | 사과 |
-    | book | 책 |
-    | happy | 행복한 |
-    
-    ### 🔄 해결 방법:
-    1. 구글 시트에서 **파일 → 웹에 게시** 클릭
-    2. **"쉼표로 구분된 값(.csv)"** 선택
-    3. **게시** 클릭
-    4. 왼쪽 사이드바의 **"데이터 새로고침"** 버튼 클릭
+    1. 구글 시트가 '웹에 게시' 되어 있는지 확인
+    2. 시트의 첫 번째 행이 'Word', 'Meaning'인지 확인
+    3. 인터넷 연결 상태 확인
     """)
 
+# 모바일 사용 팁
 st.markdown("---")
-st.caption("🚀 Powered by Streamlit + Google Sheets + AI | 자동 연결 버전")
+st.info("""
+### 📱 아이패드/모바일 사용 팁:
+- **첫 사용 시**: 브라우저에서 음성 권한 허용
+- **iOS Safari**: 설정 → Safari → 음성 인식 허용  
+- **음성이 안 나올 때**: 기기 볼륨 확인 및 무음 모드 해제
+- **Web Speech API 우선 사용**: 빠르고 안정적인 즉시 재생
+""")
 
-# 하단에 현재 설정된 시트 URL 표시 (개발자용)
-with st.expander("🔧 개발자 정보", expanded=False):
-    st.code(f"GOOGLE_SHEET_URL = '{GOOGLE_SHEET_URL}'", language="python")
-    st.caption("💡 시트 주소를 변경하려면 코드의 GOOGLE_SHEET_URL 변수를 수정하세요.")
+st.caption("🚀 Powered by Web Speech API + Streamlit | 모바일 완벽 호환 버전")
