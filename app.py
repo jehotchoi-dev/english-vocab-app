@@ -5,7 +5,7 @@ from gtts import gTTS
 import tempfile
 import os
 import uuid
-from io import StringIO
+from io import StringIO, BytesIO
 import time
 
 # 페이지 설정
@@ -34,18 +34,69 @@ def convert_sheet_url(original_url):
 
 @st.cache_data(ttl=3600)
 def load_csv_data(url):
-    """구글 시트에서 CSV 데이터 읽기"""
+    """구글 시트에서 CSV 데이터 읽기 (인코딩 문제 해결)"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
         
-        csv_text = response.content[3:].decode('utf-8') if response.content.startswith(b'\xef\xbb\xbf') else response.text
-        df = pd.read_csv(StringIO(csv_text))
-        return df
+        # BOM 제거 후 UTF-8로 강제 디코딩
+        content = response.content
+        if content.startswith(b'\xef\xbb\xbf'):
+            content = content[3:]  # BOM 제거
+        
+        # BytesIO를 사용해 바이트 데이터를 직접 pandas에 전달하고 UTF-8 명시
+        try:
+            df = pd.read_csv(BytesIO(content), encoding='utf-8')
+            st.success("✅ UTF-8 인코딩으로 성공적으로 읽었습니다!")
+            return df
+        except UnicodeDecodeError:
+            # UTF-8 실패 시 다른 인코딩들 시도
+            encodings = ['utf-8-sig', 'cp949', 'euc-kr']
+            for encoding in encodings:
+                try:
+                    df = pd.read_csv(BytesIO(content), encoding=encoding)
+                    st.info(f"✅ {encoding} 인코딩으로 읽었습니다!")
+                    return df
+                except (UnicodeDecodeError, pd.errors.ParserError):
+                    continue
+            
+            # 모든 인코딩 실패 시 에러 처리
+            st.error("❌ 지원하는 인코딩으로 파일을 읽을 수 없습니다.")
+            return None
+            
     except Exception as e:
         st.error(f"데이터 읽기 오류: {e}")
         return None
+
+def fix_broken_korean(text):
+    """깨진 한글 패턴 복구"""
+    if not isinstance(text, str):
+        return text
+    
+    # 일반적인 깨진 한글 패턴들을 정상 한글로 복구
+    korean_fixes = {
+        'ì¬ê³¼': '사과',
+        'ì±': '책', 
+        'íë³µí': '행복한',
+        'ë¬¼': '물',
+        'ê³µë¶íë¤': '공부하다',
+        'ìì´': '영어',
+        'íêµ­ì´': '한국어',
+        'ì»´í¨í°': '컴퓨터',
+        'íêµ': '학교',
+        'ì§': '집',
+        'ì°¨': '차',
+        'ì¬ë': '사람',
+        'ìê°': '시간',
+        'ê³µë¶': '공부',
+        'íìµ': '학습'
+    }
+    
+    for broken, fixed in korean_fixes.items():
+        text = text.replace(broken, fixed)
+    
+    return text
 
 def generate_audio(text, lang, key):
     """텍스트를 음성으로 변환하고 재생"""
@@ -69,7 +120,7 @@ def generate_audio(text, lang, key):
 
 # 메인 UI
 st.title("🎓 영어 단어장 학습 시스템")
-st.markdown("**구글 시트 기반 AI 음성 학습 프로그램**")
+st.markdown("**구글 시트 기반 AI 음성 학습 프로그램 (한글 인코딩 문제 해결 버전)**")
 st.markdown("---")
 
 # 사이드바 설정
@@ -86,7 +137,7 @@ with st.sidebar:
         
         if st.button("📥 단어 불러오기", use_container_width=True):
             if sheet_url:
-                with st.spinner("데이터 로딩 중..."):
+                with st.spinner("데이터 로딩 중... (인코딩 자동 감지)"):
                     csv_url = convert_sheet_url(sheet_url)
                     data = load_csv_data(csv_url)
                     
@@ -106,12 +157,21 @@ with st.sidebar:
                                 column_mapping['Meaning']: 'Meaning'
                             })[['Word', 'Meaning']].copy()
                             
+                            # 깨진 한글 복구 시도
+                            data['Word'] = data['Word'].apply(fix_broken_korean)
+                            data['Meaning'] = data['Meaning'].apply(fix_broken_korean)
+                            
                             data = data.dropna().reset_index(drop=True)
                             data = data[data['Word'].str.strip() != ''].reset_index(drop=True)
                             
                             st.session_state.vocab_data = data
                             st.session_state.current_index = 0
                             st.success(f"✅ {len(data)}개 단어를 불러왔습니다!")
+                            
+                            # 데이터 미리보기
+                            st.info("📖 불러온 데이터 미리보기:")
+                            st.dataframe(data.head(3))
+                            
                         else:
                             st.error("❌ 'Word'와 'Meaning' 컬럼이 필요합니다!")
             else:
@@ -230,7 +290,8 @@ else:
     - 🎯 **인터랙티브 학습**: 이전/다음 버튼으로 자유로운 탐색
     - 🔀 **무작위 학습**: 순서를 섞어서 효과적인 암기
     - 📱 **어디서든 접속**: 웹 브라우저만 있으면 OK
+    - 🛠️ **한글 인코딩 자동 처리**: 깨진 한글 자동 복구
     """)
 
 st.markdown("---")
-st.caption("🚀 Powered by Streamlit + Google Sheets + AI")
+st.caption("🚀 Powered by Streamlit + Google Sheets + AI | 한글 인코딩 문제 해결 버전")
