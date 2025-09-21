@@ -98,29 +98,30 @@ def fix_broken_korean(text):
     
     return text
 
-def generate_audio(text, lang, key):
-    """텍스트를 음성으로 변환하고 재생"""
+# ✅ 수정된 함수: key 매개변수 제거
+def generate_audio(text, lang):
+    """텍스트를 음성으로 변환하고 오디오 바이트 반환"""
     if not text or str(text).strip() == "":
-        return
+        return None
     
     try:
-        with st.spinner(f"🔊 {text} 음성 생성 중..."):
-            tts = gTTS(text=str(text).strip(), lang=lang)
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            tts.save(temp_file.name)
-            
-            with open(temp_file.name, 'rb') as f:
-                audio_bytes = f.read()
-            
-            st.audio(audio_bytes, format="audio/mp3", key=key)
-            os.unlink(temp_file.name)
-            
+        tts = gTTS(text=str(text).strip(), lang=lang)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        tts.save(temp_file.name)
+        
+        with open(temp_file.name, 'rb') as f:
+            audio_bytes = f.read()
+        
+        os.unlink(temp_file.name)
+        return audio_bytes
+        
     except Exception as e:
         st.error(f"음성 생성 오류: {e}")
+        return None
 
 # 메인 UI
 st.title("🎓 영어 단어장 학습 시스템")
-st.markdown("**구글 시트 기반 AI 음성 학습 프로그램 (한글 인코딩 문제 해결 버전)**")
+st.markdown("**구글 시트 기반 AI 음성 학습 프로그램**")
 st.markdown("---")
 
 # 사이드바 설정
@@ -220,18 +221,34 @@ if st.session_state.vocab_data is not None:
         col1, col2, col3 = st.columns(3)
         
         with col1:
+            # ✅ 수정된 부분: key 인자 제거
             if st.button("🇺🇸 영어 듣기", use_container_width=True, type="primary"):
-                generate_audio(word_data['Word'], 'en', f"en_{current_idx}")
+                with st.spinner(f"🔊 '{word_data['Word']}' 음성 생성 중..."):
+                    audio_bytes = generate_audio(word_data['Word'], 'en')
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")  # key 제거
         
         with col2:
             if st.button("🇰🇷 한국어 듣기", use_container_width=True, type="primary"):
-                generate_audio(word_data['Meaning'], 'ko', f"ko_{current_idx}")
+                with st.spinner(f"🔊 '{word_data['Meaning']}' 음성 생성 중..."):
+                    audio_bytes = generate_audio(word_data['Meaning'], 'ko')
+                    if audio_bytes:
+                        st.audio(audio_bytes, format="audio/mp3")  # key 제거
         
         with col3:
             if st.button("🎵 둘 다 듣기", use_container_width=True, type="secondary"):
-                generate_audio(word_data['Word'], 'en', f"both_en_{current_idx}")
-                time.sleep(1)
-                generate_audio(word_data['Meaning'], 'ko', f"both_ko_{current_idx}")
+                with st.spinner("🔊 영어와 한국어 음성 생성 중..."):
+                    # 영어 먼저
+                    audio_en = generate_audio(word_data['Word'], 'en')
+                    if audio_en:
+                        st.write("🇺🇸 영어:")
+                        st.audio(audio_en, format="audio/mp3")  # key 제거
+                    
+                    # 한국어
+                    audio_ko = generate_audio(word_data['Meaning'], 'ko')
+                    if audio_ko:
+                        st.write("🇰🇷 한국어:")
+                        st.audio(audio_ko, format="audio/mp3")  # key 제거
         
         # 네비게이션 버튼
         st.markdown("---")
@@ -294,4 +311,4 @@ else:
     """)
 
 st.markdown("---")
-st.caption("🚀 Powered by Streamlit + Google Sheets + AI | 한글 인코딩 문제 해결 버전")
+st.caption("🚀 Powered by Streamlit + Google Sheets + AI | 음성 재생 오류 해결 버전")
